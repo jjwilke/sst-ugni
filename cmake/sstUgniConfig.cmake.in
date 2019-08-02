@@ -1,0 +1,11 @@
+# Compute paths
+@PACKAGE_INIT@
+
+GET_FILENAME_COMPONENT(sstUgni_CMAKE_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
+
+INCLUDE("${sstUgni_CMAKE_DIR}/sstUgniTargets.cmake")
+
+
+
+
+

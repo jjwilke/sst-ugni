@@ -1,0 +1,6 @@
+Cflags: -I@CMAKE_INSTALL_PREFIX@/include
+Description: Cray Gemini Network Interface
+Libs:
+Name: cray-gni-headers
+Version: 5.0.11
+
