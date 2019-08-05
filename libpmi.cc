@@ -14,7 +14,10 @@ MakeDebugSlot(pmi)
   debug_printf(sprockit::dbg::pmi, "PMI Rank %d: %s", tport->rank(), \
     sprockit::printf(__VA_ARGS__).c_str())
 
-extern sumi::Transport* activeTransport();
+static sumi::Transport* activeTransport(){
+  sstmac::sw::Thread* t = sstmac::sw::OperatingSystem::currentThread();
+  return t->getApi<sumi::Transport>("ugni");
+}
 
 static sstmac::sw::App* current_app(){
   return sstmac::sw::OperatingSystem::currentThread()->parentApp();

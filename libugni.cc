@@ -4,14 +4,23 @@
 #include <sumi/message.h>
 #include <sumi/sim_transport.h>
 #include <sstmac/software/api/api.h>
+#include <sstmac/software/process/app.h>
 #include <sstmac/software/process/operating_system.h>
 #include <sstmac/software/process/thread.h>
+#include <list>
+#include <cstdio>
 
 MakeDebugSlot(ugni);
 
+#if 1
 #define debug(tport, ...) \
   debug_printf(sprockit::dbg::ugni, "GNI Rank %d: %s", tport->rank(), \
     sprockit::printf(__VA_ARGS__).c_str())
+#else
+#define debug(tport, ...) \
+  printf("GNI Rank %d: %s\n", tport->rank(), \
+    sprockit::printf(__VA_ARGS__).c_str());
+#endif
 
 using sstmac::hw::NetworkMessage;
 
@@ -126,8 +135,24 @@ class GNIRdmaMessage : public GNIMessage {
 
   void writeSyncValue() override {
     if (sync_flag_addr_){
-      uint64_t* ptr = (uint64_t*) sync_flag_addr_;
-      *ptr = sync_flag_value_;
+      switch(sstmac::hw::NetworkMessage::type()){
+      case payload:
+      case rdma_get_payload:
+      case rdma_put_payload: {
+        switch(type()){
+          case GNI_POST_FMA_PUT_W_SYNCFLAG:
+          case GNI_POST_FMA_GET_W_FLAG: {
+            uint64_t* ptr = (uint64_t*) sync_flag_addr_;
+            *ptr = sync_flag_value_;
+            break;
+          }
+          default:
+            break;
+        }
+      }
+      default:
+        break;
+      }
     }
   }
 
@@ -201,6 +226,8 @@ class GNISmsgMessage : public GNIMessage {
 
 class UGNITransport : public sumi::SimTransport
 {
+  using CqQueue = sstmac::sw::SingleProgressQueue<sumi::Message>;
+
  public:
   SST_ELI_REGISTER_DERIVED(
     API,
@@ -212,34 +239,80 @@ class UGNITransport : public sumi::SimTransport
 
   UGNITransport(SST::Params& params, sstmac::sw::App* app, SST::Component* comp) :
     sumi::SimTransport(params, app, comp),
-    pending_smsg_(4) //leave room for 4 cq for now, this can grow
+    next_available_smsg_(8),
+    pending_smsg_(8)
   {
+    for (int i=0; i < 8; ++i){
+      cqs_.emplace_back(app->os());
+    }
+  }
+
+  GNIMessage* front(int cq_id){
+    double timeout = 10e-3;
+    //try for at least 10 ms
+    return dynamic_cast<GNIMessage*>(cqs_[cq_id].front(true, timeout));
+  }
+
+  void pop(int cq_id){
+    cqs_[cq_id].pop();
+  }
+
+  GNISmsgMessage* pollForNextSmsg(int cq_id){
+    double timeout = 10e-3; //block for at least 10 ms
+    auto* msg = cqs_[cq_id].front(true, timeout);
+    if (msg->NetworkMessage::type() == NetworkMessage::payload){
+      return dynamic_cast<GNISmsgMessage*>(msg);
+    } else {
+      return nullptr;
+    }
+  }
+
+  gni_return_t smsgMatch(int cq_id, GNISmsgMessage* smsg, uint8_t* tag)
+  {
+    if (*tag == GNI_SMSG_ANY_TAG){
+      setAvailableSmsg(cq_id, smsg);
+      *tag = smsg->tag();
+      return GNI_RC_SUCCESS;
+    } else if (*tag == smsg->tag()){
+      setAvailableSmsg(cq_id, smsg);
+      *tag = smsg->tag();
+      return GNI_RC_SUCCESS;
+    } else {
+      return GNI_RC_NO_MATCH;
+    }
   }
 
   void init() override {
     sumi::SimTransport::init();
     //these are not ever used, but are needed for faking out real implementations
-    setenv("PMI_GNI_LOC_ADDR", "0", 0);
-    setenv("PMI_GNI_PTAG", "0", 0);
-    setenv("PMI_GNI_COOKIE", "0", 0);
-    setenv("PMI_GNI_DEV_ID", "0", 0);
+    parent()->setenv("PMI_GNI_LOC_ADDR", "0", 0);
+    parent()->setenv("PMI_GNI_PTAG",     "0", 0);
+    parent()->setenv("PMI_GNI_COOKIE",   "0", 0);
+    parent()->setenv("PMI_GNI_DEV_ID",   "0", 0);
   }
 
   int allocateCq(){
     int new_cq = sumi::SimTransport::allocateCqId();
+    if (new_cq >= next_available_smsg_.size()){
+      next_available_smsg_.resize(new_cq+1);
+    }
     if (new_cq >= pending_smsg_.size()){
       pending_smsg_.resize(new_cq+1);
     }
+    while (cqs_.size() <= new_cq){
+      cqs_.emplace_back(parent_->os());
+    }
+    SimTransport::allocateCq(new_cq, std::bind(&CqQueue::incoming, &cqs_[new_cq], std::placeholders::_1));
     return new_cq;
   }
 
-  void setPendingSmsg(int cq_id, GNISmsgMessage* smsg){
-    pending_smsg_[cq_id] = smsg;
+  void setAvailableSmsg(int cq_id, GNISmsgMessage* smsg){
+    next_available_smsg_[cq_id] = smsg;
   }
 
-  GNISmsgMessage* takePendingSmsg(int cq_id){
-    auto ret = pending_smsg_[cq_id];
-    pending_smsg_[cq_id] = nullptr;
+  GNISmsgMessage* takeAvailableSmsg(int cq_id){
+    auto ret = next_available_smsg_[cq_id];
+    next_available_smsg_[cq_id] = nullptr;
     return ret;
   }
 
@@ -250,19 +323,32 @@ class UGNITransport : public sumi::SimTransport
     return GNI_RC_SUCCESS;
   }
 
+  void popPendingSmsg(int cq_id, std::list<GNISmsgMessage*>::iterator iter){
+    pending_smsg_[cq_id].erase(iter);
+  }
+
+  void addPendingSmsg(int cq_id, GNISmsgMessage* msg){
+    pending_smsg_[cq_id].push_back(msg);
+  }
+
+  std::list<GNISmsgMessage*>::iterator smsgPendingBegin(int cq_id){
+    return pending_smsg_[cq_id].begin();
+  }
+
+  std::list<GNISmsgMessage*>::iterator smsgPendingEnd(int cq_id){
+    return pending_smsg_[cq_id].end();
+  }
+
  private:
-  std::vector<GNISmsgMessage*> pending_smsg_;
+  std::vector<std::list<GNISmsgMessage*>> pending_smsg_;
+  std::vector<GNISmsgMessage*> next_available_smsg_;
+  std::vector<CqQueue> cqs_;
 };
 
 UGNITransport* sstmac_ugni()
 {
   sstmac::sw::Thread* t = sstmac::sw::OperatingSystem::currentThread();
   return t->getApi<UGNITransport>("ugni");
-}
-
-sumi::Transport* activeTransport()
-{
-  return sstmac_ugni(); 
 }
 
 extern "C" gni_return_t
@@ -283,12 +369,12 @@ GNI_CqGetEvent(
   gni_cq_handle_t cq_hndl,
   gni_cq_entry_t* event_data) {
   auto tport = sstmac_ugni();
-  double timeout = 10e-3; //try for at least 10 ms
-  sumi::Message* msg = tport->poll(true, cq_hndl, timeout);
+  sumi::Message* msg = tport->front(cq_hndl);
   if (msg){
-    debug(tport, "GNI_CqGetEvent(...)");
+    debug(tport, "GNI_CqGetEvent(%d,...) -> %llu", int(cq_hndl), msg->flowId());
     intptr_t msg_ptr = (intptr_t) static_cast<GNIMessage*>(msg);
     *event_data = msg_ptr;
+    tport->pop(cq_hndl);
     return GNI_RC_SUCCESS;
   } else {
     return GNI_RC_NOT_DONE;
@@ -1006,22 +1092,12 @@ extern "C" gni_return_t GNI_SmsgSendWTag(
   return GNI_RC_SUCCESS;
 }
 
-static GNISmsgMessage* poll_for_next_smsg(UGNITransport* api, int cq_id){
-  double timeout = 10e-3; //block for at least 10 ms
-  sumi::Message* msg = api->poll(true, cq_id, timeout);
-  if (msg->NetworkMessage::type() == NetworkMessage::payload){
-    return dynamic_cast<GNISmsgMessage*>(msg);
-  } else {
-    return nullptr;
-  }
-}
-
 extern "C" gni_return_t GNI_SmsgGetNext(
   gni_ep_handle_t     ep_hndl,
   void                **header) {
   UGNITransport* api = sstmac_ugni();
-  debug(api, "GNI_GetNext(...)")
-  auto smsg = poll_for_next_smsg(api, ep_hndl->cq_id);
+  debug(api, "GNI_SmsgGetNext(...)")
+  auto smsg = api->pollForNextSmsg(ep_hndl->cq_id);
   if (smsg){
     *header = smsg->localBuffer();
     return GNI_RC_SUCCESS;
@@ -1035,30 +1111,34 @@ extern "C" gni_return_t GNI_SmsgGetNextWTag(
   void                **header,
   uint8_t             *tag) {
   UGNITransport* api = sstmac_ugni();
-  debug(api, "GNI_GetNextWTag(tag=%d,...)", *tag)
-  auto smsg = poll_for_next_smsg(api, ep_hndl->cq_id);
+  debug(api, "GNI_SmsgGetNextWTag(tag=%d,...)", *tag)
+  auto end = api->smsgPendingEnd(ep_hndl->cq_id);
+  for (auto iter=api->smsgPendingBegin(ep_hndl->cq_id); iter != end; ++iter){
+    auto rc = api->smsgMatch(ep_hndl->cq_id, *iter, tag);
+    if (rc == GNI_RC_SUCCESS){
+      api->popPendingSmsg(ep_hndl->cq_id, iter);
+      return rc;
+    }
+  }
+
+  auto* smsg = api->pollForNextSmsg(ep_hndl->cq_id);
   if (smsg){
-    if (*tag == GNI_SMSG_ANY_TAG){
-      api->setPendingSmsg(ep_hndl->cq_id, smsg);
-      *tag = smsg->tag();
-      return GNI_RC_SUCCESS;
-    } else if (*tag == smsg->tag()){
-      api->setPendingSmsg(ep_hndl->cq_id, smsg);
-      *tag = smsg->tag();
-      return GNI_RC_SUCCESS;
+    auto rc = api->smsgMatch(ep_hndl->cq_id, smsg, tag);
+    if (rc == GNI_RC_SUCCESS){
+      return rc;
     } else {
+      api->addPendingSmsg(ep_hndl->cq_id, smsg);
       return GNI_RC_NO_MATCH;
     }
-  } else {
-    return GNI_RC_NOT_DONE;
   }
+  return GNI_RC_NOT_DONE;
 }
 
 extern "C" gni_return_t GNI_SmsgRelease(
   gni_ep_handle_t      ep_hndl) {
   auto api = sstmac_ugni();
   debug(api, "GNI_SmsgRelease(...)");
-  GNISmsgMessage* smsg = api->takePendingSmsg(ep_hndl->cq_id);
+  GNISmsgMessage* smsg = api->takeAvailableSmsg(ep_hndl->cq_id);
   if (!smsg){
     return GNI_RC_INVALID_STATE;
   } else {

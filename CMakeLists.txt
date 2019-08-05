@@ -23,21 +23,32 @@ configure_file(
  ${CMAKE_CURRENT_BINARY_DIR}/env.sh @ONLY
 )
 
-set(SOURCES
- libpmi.cc
- libugni.cc
- libibverbs.c
-)
-add_library(sstugni SHARED ${SOURCES})
+add_library(ugni SHARED libugni.cc)
 #make sure have C++11 for SST
-target_compile_features(sstugni PUBLIC cxx_std_11)
-target_link_libraries(sstugni
+target_compile_features(ugni PUBLIC cxx_std_11)
+target_link_libraries(ugni
   PUBLIC ${SSTMAC_LIB} ${SPKT_LIB})
-target_include_directories(sstugni
+target_include_directories(ugni
+  PUBLIC ${SSTMAC_INC})
+
+add_library(pmi SHARED libpmi.cc)
+#make sure have C++11 for SST
+target_compile_features(pmi PUBLIC cxx_std_11)
+target_link_libraries(pmi
+  PUBLIC ${SSTMAC_LIB} ${SPKT_LIB})
+target_include_directories(pmi
+  PUBLIC ${SSTMAC_INC})
+
+add_library(ibverbs SHARED libibverbs.c)
+#make sure have C++11 for SST
+target_compile_features(ibverbs PUBLIC cxx_std_11)
+target_link_libraries(ibverbs
+  PUBLIC ${SSTMAC_LIB} ${SPKT_LIB})
+target_include_directories(ibverbs
   PUBLIC ${SSTMAC_INC})
 
 INSTALL(
-  TARGETS sstugni
+  TARGETS ugni pmi ibverbs
   EXPORT sstUgni
   RUNTIME DESTINATION bin
   LIBRARY DESTINATION lib
