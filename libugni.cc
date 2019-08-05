@@ -12,6 +12,8 @@
 
 MakeDebugSlot(ugni);
 
+#define PROGRESS 1
+
 #if 1
 #define debug(tport, ...) \
   debug_printf(sprockit::dbg::ugni, "GNI Rank %d: %s", tport->rank(), \
@@ -226,7 +228,11 @@ class GNISmsgMessage : public GNIMessage {
 
 class UGNITransport : public sumi::SimTransport
 {
+#if PROGRESS
+  using CqQueue = sstmac::sw::PollingProgressQueue<sumi::Message>;
+#else
   using CqQueue = sstmac::sw::SingleProgressQueue<sumi::Message>;
+#endif
 
  public:
   SST_ELI_REGISTER_DERIVED(
@@ -238,28 +244,62 @@ class UGNITransport : public sumi::SimTransport
     "provides the UGNI transport API")
 
   UGNITransport(SST::Params& params, sstmac::sw::App* app, SST::Component* comp) :
-    sumi::SimTransport(params, app, comp),
-    next_available_smsg_(8),
-    pending_smsg_(8)
+    sumi::SimTransport(params, app, comp)
   {
-    for (int i=0; i < 8; ++i){
-      cqs_.emplace_back(app->os());
+    SimTransport::registerNullHandler(std::bind(&UGNITransport::nullCqNotify, this, std::placeholders::_1));
+  }
+
+  void nullCqNotify(sumi::Message* msg){
+#if PROGRESS
+    for (CqQueue* cq : cqs_){
+      if (cq && cq->blocked()){
+        cq->unblock();
+        break;
+      }
     }
+#endif
+  }
+
+  int allocateCq(){
+    int new_cq_id = sumi::SimTransport::allocateCqId();
+    if (new_cq_id >= next_available_smsg_.size()){
+      next_available_smsg_.resize(new_cq_id+1);
+    }
+    if (new_cq_id >= pending_smsg_.size()){
+      pending_smsg_.resize(new_cq_id+1);
+    }
+    if (new_cq_id >= cqs_.size()){
+      cqs_.resize(new_cq_id+1,nullptr);
+    }
+    CqQueue* new_cq = new CqQueue(parent_->os());
+    cqs_[new_cq_id] = new_cq;
+#if PROGRESS
+    for (CqQueue* cq : cqs_){
+      if (cq && cq != new_cq){
+        cq->addPartner(new_cq);
+        new_cq->addPartner(cq);
+      }
+    }
+#endif
+    SimTransport::allocateCq(new_cq_id, std::bind(&CqQueue::incoming, cqs_[new_cq_id], std::placeholders::_1));
+    return new_cq_id;
   }
 
   GNIMessage* front(int cq_id){
+#if PROGRESS
+    return dynamic_cast<GNIMessage*>(cqs_[cq_id]->front());
+#else
     double timeout = 10e-3;
-    //try for at least 10 ms
-    return dynamic_cast<GNIMessage*>(cqs_[cq_id].front(true, timeout));
+    return dynamic_cast<GNIMessage*>(cqs_[cq_id]->front(true,timeout));
+#endif
   }
 
   void pop(int cq_id){
-    cqs_[cq_id].pop();
+    cqs_[cq_id]->pop();
   }
 
   GNISmsgMessage* pollForNextSmsg(int cq_id){
-    double timeout = 10e-3; //block for at least 10 ms
-    auto* msg = cqs_[cq_id].front(true, timeout);
+    auto* msg = cqs_[cq_id]->front();
     if (msg->NetworkMessage::type() == NetworkMessage::payload){
       return dynamic_cast<GNISmsgMessage*>(msg);
     } else {
@@ -289,21 +329,6 @@ class UGNITransport : public sumi::SimTransport
     parent()->setenv("PMI_GNI_PTAG",     "0", 0);
     parent()->setenv("PMI_GNI_COOKIE",   "0", 0);
     parent()->setenv("PMI_GNI_DEV_ID",   "0", 0);
-  }
-
-  int allocateCq(){
-    int new_cq = sumi::SimTransport::allocateCqId();
-    if (new_cq >= next_available_smsg_.size()){
-      next_available_smsg_.resize(new_cq+1);
-    }
-    if (new_cq >= pending_smsg_.size()){
-      pending_smsg_.resize(new_cq+1);
-    }
-    while (cqs_.size() <= new_cq){
-      cqs_.emplace_back(parent_->os());
-    }
-    SimTransport::allocateCq(new_cq, std::bind(&CqQueue::incoming, &cqs_[new_cq], std::placeholders::_1));
-    return new_cq;
   }
 
   void setAvailableSmsg(int cq_id, GNISmsgMessage* smsg){
@@ -342,7 +367,7 @@ class UGNITransport : public sumi::SimTransport
  private:
   std::vector<std::list<GNISmsgMessage*>> pending_smsg_;
   std::vector<GNISmsgMessage*> next_available_smsg_;
-  std::vector<CqQueue> cqs_;
+  std::vector<CqQueue*> cqs_;
 };
 
 UGNITransport* sstmac_ugni()
@@ -371,7 +396,8 @@ GNI_CqGetEvent(
   auto tport = sstmac_ugni();
   sumi::Message* msg = tport->front(cq_hndl);
   if (msg){
-    debug(tport, "GNI_CqGetEvent(%d,...) -> %llu", int(cq_hndl), msg->flowId());
+    debug(tport, "GNI_CqGetEvent(%d,...) -> %llu",
+          int(cq_hndl), (msg ? msg->flowId() : -1));
     intptr_t msg_ptr = (intptr_t) static_cast<GNIMessage*>(msg);
     *event_data = msg_ptr;
     tport->pop(cq_hndl);
