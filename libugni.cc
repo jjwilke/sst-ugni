@@ -9,6 +9,7 @@
 #include <sstmac/software/process/thread.h>
 #include <list>
 #include <cstdio>
+#include <limits>
 
 MakeDebugSlot(ugni);
 
