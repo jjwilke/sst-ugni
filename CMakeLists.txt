@@ -47,6 +47,11 @@ target_link_libraries(ibverbs
 target_include_directories(ibverbs
   PUBLIC ${SSTMAC_INC})
 
+configure_file(
+ ${CMAKE_CURRENT_SOURCE_DIR}/cray-udreg.pc.in
+ ${CMAKE_CURRENT_BINARY_DIR}/cray-udreg.pc @ONLY
+)
+
 INSTALL(
   TARGETS ugni pmi ibverbs
   EXPORT sstUgni
@@ -85,6 +90,7 @@ install(
 install(
   FILES
   ${CMAKE_CURRENT_BINARY_DIR}/cray-ugni.pc
+  ${CMAKE_CURRENT_BINARY_DIR}/cray-udreg.pc
   ${CMAKE_CURRENT_BINARY_DIR}/env.sh
   ${CMAKE_CURRENT_BINARY_DIR}/cray-gni-headers.pc
   DESTINATION lib/pkgconfig

@@ -1,0 +1,9 @@
+includedir=@CMAKE_INSTALL_PREFIX@/include
+libdir=@CMAKE_INSTALL_PREFIX@/lib64
+
+Cflags: -I${includedir}
+Description: User-level dynamic registration library (UDREG)
+Libs: -L${libdir} -ludreg
+Name: cray-udreg
+Version: 2.3.2
+
