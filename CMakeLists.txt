@@ -78,11 +78,15 @@ install(
 FILE(GLOB HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
 install(
   FILES 
-  ${CMAKE_CURRENT_BINARY_DIR}/cray-ugni.pc
-  ${CMAKE_CURRENT_BINARY_DIR}/env.sh
-  ${CMAKE_CURRENT_BINARY_DIR}/cray-gni-headers.pc
   ${HEADERS}
   DESTINATION include
 )
 
+install(
+  FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/cray-ugni.pc
+  ${CMAKE_CURRENT_BINARY_DIR}/env.sh
+  ${CMAKE_CURRENT_BINARY_DIR}/cray-gni-headers.pc
+  DESTINATION lib/pkgconfig
+)
 
