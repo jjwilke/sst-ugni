@@ -1,5 +1,10 @@
 cmake_minimum_required (VERSION 3.12)
 
+STRING(REGEX MATCH sstcc IS_SST_COMPILER ${CMAKE_C_COMPILER})
+if (IS_SST_COMPILER)
+  set(ENV{SSTMAC_COMPONENT_BUILD} 1)
+endif()
+
 project (sstUgni)
 # The version number.
 set (SST_uGNI_VERSION_MAJOR 1)
@@ -26,10 +31,12 @@ configure_file(
 add_library(ugni SHARED libugni.cc)
 #make sure have C++11 for SST
 target_compile_features(ugni PUBLIC cxx_std_11)
+
 target_link_libraries(ugni
   PUBLIC ${SSTMAC_LIB} ${SPKT_LIB})
 target_include_directories(ugni
   PUBLIC ${SSTMAC_INC})
+
 
 add_library(pmi SHARED libpmi.cc)
 #make sure have C++11 for SST
@@ -46,6 +53,13 @@ target_link_libraries(ibverbs
   PUBLIC ${SSTMAC_LIB} ${SPKT_LIB})
 target_include_directories(ibverbs
   PUBLIC ${SSTMAC_INC})
+
+if (IS_SST_COMPILER)
+  target_compile_options(ugni PRIVATE --sst-component)
+  target_compile_options(pmi PRIVATE --sst-component)
+  target_compile_options(ibverbs PRIVATE --sst-component)
+endif()
+
 
 INSTALL(
   TARGETS ugni pmi ibverbs
